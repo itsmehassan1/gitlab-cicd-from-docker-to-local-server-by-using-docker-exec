@@ -1,0 +1,113 @@
+stages:   
+  # - SAST
+  - build  
+  - package
+  - deploy
+
+build:
+  image: $MAVEN_IMAGE
+  stage: build
+  script:
+    - "mvn clean install -Dmaven.test.skip=true"
+    - ls -l
+    - ls -l target/
+  artifacts:
+    paths:
+      - target/*.war
+    expire_in: 1 days  
+  tags:
+    - $RUNNER_TAG
+
+
+# SonarScanner:
+#   image: "sonarsource/sonar-scanner-cli:latest"
+#   variables:
+#     SONARQUBE_HOST: "$SONARQUBE_HOST"
+#     SONARQUBE_TOKEN: "$SONAR_TOKEN_VAL"
+#     SONARQUBE_PROJECT_KEY: $CI_PROJECT_PATH_SLUG
+#     CI_PROJECT_DIR: "src"
+#   cache:
+#     paths:
+#       - .sonar/cache
+#   stage: SAST
+#   tags:
+#     - $RUNNER_TAG
+#   script:
+#     - "echo SAST"
+#     - sonar-scanner
+#       -Dsonar.host.url=$SONARQUBE_HOST
+#       -Dsonar.login=$SONARQUBE_TOKEN
+#       -Dsonar.projectKey=$CI_PROJECT_PATH_SLUG
+#       -Dsonar.sources=src
+#       -Dsonar.java.binaries=$CI_PROJECT_DIR
+#       -Dsonar.qualitygate.wait=false
+#       -X
+
+
+.deploy:
+  stage: deploy
+  image: alpine:latest
+  before_script:
+    - apk update
+    - apk add --no-cache sshpass openssh rsync openssh-server
+    - mkdir -p ~/.ssh
+    - echo "$SSH_PRIVATE_KEY" > ~/.ssh/id_rsa
+    - chmod 600 ~/.ssh/id_rsa
+    - ssh-keyscan -H $ESB_ADDIP >> ~/.ssh/known_hosts
+    - echo -e "Host *\n\tStrictHostKeyChecking no\n" > ~/.ssh/config
+    - eval $(ssh-agent -s)
+    - echo "${PRIVATE_KEY}" | tr -d ' ' | base64 -d | ssh-add -
+
+  script:
+    - whoami
+    # - rsync -auv --checksum --no-perms --no-owner --no-group -e "ssh" "$ESB_USER@$ESB_ADDIP:/opt/application-backup"
+    
+    # - sshpass -p "$ESB_PASS" ssh -t -o StrictHostKeyChecking=no "$ESB_USER@$ESB_ADDIP" 'cp /opt/tomcat/webapps/tec_bss.war /opt/application-backup' 
+    # - sshpass -p "$ESB_PASS" rsync -av -e "ssh -o StrictHostKeyChecking=no" $DEPLOY_SOURCE_PATH/ "$ESB_USER@$ESB_ADDIP:/opt/tomcat/webapps/"
+    # - rsync -auv --checksum --no-perms --no-owner --no-group -e "ssh" "$DEPLOY_SOURCE_PATH/" "$ESB_USER@$ESB_ADDIP:/opt/tomcat/webapps/"
+    - rsync -auv --checksum --no-perms --no-owner --no-group -e "ssh" "$DEPLOY_SOURCE_PATH/" "$ESB_USER@$ESB_ADDIP:/opt/tomcat/webapps/"
+    # - rsync -auv --checksum --no-perms --no-owner --no-group -e "ssh" "$ESB_USER@$ESB_ADDIP:/opt/tomcat/webapps/tec_*.war" /opt/application-backup
+    - rsync -auv --checksum --no-perms --no-owner --no-group -e "ssh" target "$DEPLOY_SOURCE_PATH/" "$ESB_USER@$ESB_ADDIP:/opt/tomcat/webapps/"
+    - |
+      if [ "$CI_COMMIT_BRANCH" == "$PRD_BRANCH" ]; then
+          sshpass -p "$ESB_PASS_02" ssh -t -o StrictHostKeyChecking=no "$ESB_USER@$ESB_ADDIP_2" 'cp /opt/tomcat/webapps/tec_bss.war /opt/application-backup' && sshpass -p "$ESB_PASS" rsync -av -e "ssh -o StrictHostKeyChecking=no" "$DEPLOY_SOURCE_PATH/" "$ESB_USER@$ESB_ADDIP_2:/opt/tomcat/webapps/"
+
+        else
+          echo "Current stage is $CI_COMMIT_BRANCH."
+        fi
+
+  tags:
+    - $RUNNER_TAG
+
+deploy_dev:
+  extends: .deploy
+  variables:
+    ESB_PASS: $ESB_PASS_DEV
+    ESB_USER: $ESB_USER_DEV
+    ESB_ADDIP: $ESB_ADDIP_DEV
+    DEPLOY_SOURCE_PATH: $DEPLOY_SOURCE_PATH_DEV
+  rules:
+    - if: $CI_COMMIT_BRANCH == $DEV_BRANCH
+
+deploy_staging:
+  extends: .deploy
+  variables:
+    ESB_PASS: $ESB_PASS_STG
+    ESB_USER: $ESB_USER_STG
+    ESB_ADDIP: $ESB_ADDIP_STG
+    DEPLOY_SOURCE_PATH: DEPLOY_SOURCE_PATH_STG
+  rules:
+    - if: $CI_COMMIT_BRANCH == $STG_BRANCH
+
+deploy_prod:
+  extends: .deploy
+  variables:
+    ESB_PASS: $ESB_PASS_PRD
+    ESB_USER: $ESB_USER_PRD
+    ESB_ADDIP: $ESB_ADDIP_PRD
+    ESB_ADDIP_2: $ESB_ADDIP_PRD_2
+    ESB_PASS_02: $ESB_PASS_PRD_02
+    DEPLOY_SOURCE_PATH: DEPLOY_SOURCE_PATH_PRD
+  rules:
+    - if: $CI_COMMIT_BRANCH == $PRD_BRANCH
+  when: manual
