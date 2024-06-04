@@ -1,0 +1,97 @@
+##############Script for  deploying tomcat by using yaml file with the help of ansible file  and it will reload tomcat as well for deployment###########
+
+
+- hosts: all
+#  user: root
+#  become: true
+  serial: 1
+  vars:
+    BUILD_ID: "{{ lookup('env','BUILD_ID') }}"
+    BUILD_NAME: "{{ lookup('env','JOB_BASE_NAME') }}-{{ BUILD_ID }}"
+    BUILD_WORKSPACE: "{{ lookup('env','WORKSPACE') }}"
+#    BUILD_WORKSPACE: "/var/lib/jenkins/workspace/adminportal"
+#    TOMCATPATH: "/opt/tomcat"
+    TOMCATPATH:  "{{ lookup('env','TOMCATDIR') }}"
+    WAR_REMOTE_PATH: "{{ TOMCATPATH }}/webapps/"
+    WAR_LOCAL_PATH: "{{ BUILD_WORKSPACE }}/target/" 
+    GREP_STRING: "{{ TOMCATPATH }}"
+    FOLDERNAME: "APPWAR-{{ BUILD_NAME }}-{{ ansible_date_time.iso8601_basic_short}}"
+#    TOMCATPATH: "/opt/tomcat"
+    WARNAME: "{{ FILES_TEST.stdout }}"
+
+
+  tasks:
+
+  - shell: ls {{ WAR_LOCAL_PATH }}/*.war | head -1 | cut -f 1 -d '.' | xargs basename
+    ignore_errors: yes
+    register: FILES_TEST
+    delegate_to: 127.0.0.1
+
+  - name: Creating backup dir {{ FOLDERNAME }}
+    file: path=~/BACKUP/{{ FOLDERNAME }} state=directory
+
+  - shell: ls {{ WAR_REMOTE_PATH }}/{{ WARNAME }}.war
+    ignore_errors: yes
+    register: FILES_TO_RENAME
+
+  - debug:
+      msg: WAR Name is  {{ WARNAME }}
+#  - debug: msg=WARNAME
+
+
+  - copy:
+     src: "{{ item.1 }}"
+     dest: "~/BACKUP/{{ FOLDERNAME }}/"
+     remote_src: yes
+#     ignore_errors: yes
+    with_indexed_items: "{{ FILES_TO_RENAME.stdout_lines }}"
+    when: FILES_TO_RENAME.rc == 0
+
+  - name: Remove current war file {{ WAR_REMOTE_PATH }}/{{ WARNAME }}
+    file:
+     path: "{{ WAR_REMOTE_PATH }}/{{ WARNAME }}.war"
+#     ignore_errors: yes
+     state: absent
+
+
+  - name: Check if DIR exists
+    stat:
+     path: "{{ WAR_REMOTE_PATH }}/{{ WARNAME }}"
+    register: DEL_WAR_DIR
+
+  - name: Wait WAR DIR if exits
+    file:
+     path: "{{ WAR_REMOTE_PATH }}/{{ WARNAME }}"
+     state: absent
+    when: DEL_WAR_DIR.stat.exists == true and DEL_WAR_DIR.stat.isdir == true
+
+  - name: Upload WAR ...
+    synchronize: src={{ WAR_LOCAL_PATH }}/{{ WARNAME }}.war dest={{ WAR_REMOTE_PATH }}/{{ WARNAME }}.war
+
+  - name: Setting permission on WAR file
+    unarchive: src={{ WAR_REMOTE_PATH }}/{{ WARNAME }}.war dest={{ WAR_REMOTE_PATH }} copy=no mode=0755 owner=azrrepotinguser group=azrrepotinguser
+
+  - name: shutdown tomcat
+    command: sh {{ TOMCATPATH }}/bin/shutdown.sh
+
+  - pause: seconds=10
+
+  - name: Verify tomcat service is running...
+    shell: ps aux | grep -v grep | grep '{{ GREP_STRING }}' | awk '{print $2}'
+#    ignore_errors: yes
+    changed_when: false
+    register: TOMCAT_SERVICE
+
+#  - debug: msg="Check if Apache is running {{ TOMCAT_SERVICE }}"
+#  - debug: msg="{{ TOMCAT_SERVICE.stdout }} != '' =  {{ TOMCAT_SERVICE.stdout != ''}}"
+
+  - name: kill process if tomcat is still running
+    shell: kill -9  $(ps -aux | grep -v grep | grep '{{ GREP_STRING }}' | awk '{print $2}')
+    when: TOMCAT_SERVICE.stdout != ''
+    ignore_errors: yes
+
+  - command: sleep 1s
+    when: TOMCAT_SERVICE.stdout != ''
+
+  - name: start tomcat
+    shell: setsid /bin/sh -i -c  "{{ TOMCATPATH }}/bin/startup.sh"  &> /tmp/null
